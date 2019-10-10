@@ -59,10 +59,10 @@ def nearestPointOfLines(originA, dirA, originB, dirB, param_tollerance=0.0, dist
     divisorB = dirB@normalA
     originAB = originB-originA
     if abs(divisorA) <= param_tollerance or abs(divisorB) <= param_tollerance:
-        if linePointDistance(originA, dirA, originB) > dist_tollerance:
+        if dirA@dirA == 0.0 or dirB@dirB == 0.0 or linePointDistance(originA, dirA, originB) > dist_tollerance:
             return ('Parallel', float('nan'), float('nan'))
-        paramA =  originAB@dirA
-        paramB = -originAB@dirB
+        paramA =  originAB@dirA/(dirA@dirA)
+        paramB = -originAB@dirB/(dirB@dirB)
         return ('Coaxial', paramA, paramB)
     else:
         paramA =  originAB@normalB/divisorA
@@ -85,8 +85,8 @@ def lineSegmentLineSegmentIntersection(lineAVertexA, lineAVertexB, lineBVertexA,
                 return (float('nan'), float('nan'))
         elif paramA > 1.0 or paramB > 1.0: # One is chasing the other but out of reach
             return (float('nan'), float('nan'))
-        paramA = max(0.0, (lineBVertexB-lineAVertexA)@dirA)
-        paramB = max(0.0, (lineAVertexB-lineBVertexA)@dirB)
+        paramA = max(0.0, (lineBVertexB-lineAVertexA)@dirA/(dirA@dirA))
+        paramB = max(0.0, (lineAVertexB-lineBVertexA)@dirB/(dirB@dirB))
         return (paramA, paramB)
     if paramA < 0.0 or paramA > 1.0 or paramB < 0.0 or paramB > 1.0: # Intersection is outside the line segments
         return (float('nan'), float('nan'))
@@ -99,7 +99,7 @@ def rayLineSegmentIntersection(originA, dirA, lineVertexA, lineVertexB):
         return float('nan')
     if type == 'Coaxial':
         if paramA > 0.0:
-            return paramA if (paramB < 0.0) else max(0.0, (lineVertexB-originA)@dirA)
+            return paramA if (paramB < 0.0) else max(0.0, (lineVertexB-originA)@dirA/(dirA@dirA))
         else:
             return float('nan') if (paramB < 0.0 or paramB > 1.0) else 0.0
     if paramA < 0.0 or paramB < 0.0 or paramB > 1.0: # Intersection is behind the rays origin or outside of the line segment
@@ -114,6 +114,9 @@ def rayRayIntersection(originA, dirA, originB, dirB):
         if paramA < 0.0 and paramB < 0.0: # Facing away from one another
             return (float('nan'), float('nan'))
         if paramA > 0.0 and paramB > 0.0: # Facing towards each other
+            paramSum = paramA+paramB
+            paramA = paramA*paramA/paramSum
+            paramB = paramB*paramB/paramSum
             return (paramA, paramB)
         return (paramA, 0.0) if paramA > 0.0 else (0.0, paramB) # One is chasing the other
     if paramA < 0.0 or paramB < 0.0: # Intersection is behind the rays origins
@@ -200,13 +203,13 @@ class Slab:
         handleSide(self.next_vertices, self.next_lightcycles)
 
 class Collision:
-    __slots__ = ['winner_time', 'looser_time', 'winner', 'loosers', 'child']
+    __slots__ = ['winner_time', 'looser_time', 'winner', 'loosers', 'children']
     def __init__(self, winner_time, looser_time, winner, loosers):
         self.winner_time = winner_time
         self.looser_time = looser_time
         self.winner = winner
         self.loosers = loosers
-        self.child = None
+        self.children = []
 
     def checkCandidate(self):
         if self.winner != None and self.winner.collision != None and self.winner.collision.looser_time < self.winner_time:
@@ -216,31 +219,40 @@ class Collision:
                 return False
         return True
 
-    def collide(self, lightcycles, collision_candidates, polygon_vertices, polygon_normal):
+    def collide(self, lightcycles, collision_candidates, polygon_vertices, polygon_normal, tollerance=0.0001):
         for looser in self.loosers:
             looser.collision = self
-        if len(self.loosers) > 2:
-            return 'Manyfold collision' # TODO
         if len(self.loosers) == 2:
+            assert(self.loosers[0].normal@self.loosers[1].normal > 0.0)
             position = self.loosers[0].origin+self.loosers[0].ground_velocity*self.looser_time
             dirA = self.loosers[0].ground_velocity.normalized()
             dirB = self.loosers[1].ground_velocity.normalized()
-            if dirA@dirB == 0.0:
-                return 'Headon / parallel collision' # TODO
-            index = 1 if self.loosers[0].prev_slab.isOuter(dirA, dirA+dirB, polygon_normal) else 0
-            if dirA.cross(dirB)@polygon_normal > 0.0:
-                index = 1-index
-            self.child = Lightcycle(
-                lightcycles, collision_candidates, polygon_vertices, polygon_normal, None,
-                self.looser_time,
-                self.loosers[index].prev_slab, self.loosers[1-index].next_slab,
-                position, dirB, dirA
-            )
-        return True
+            ground_dir = dirA+dirB
+            if ground_dir.length > tollerance:
+                index = 1 if self.loosers[0].prev_slab.isOuter(dirA, ground_dir, polygon_normal) else 0
+                if dirA.cross(dirB)@polygon_normal > 0.0:
+                    index = 1-index
+                self.children = [Lightcycle(
+                    lightcycles, collision_candidates, polygon_vertices, polygon_normal, False,
+                    self.looser_time, self.loosers[index].prev_slab, self.loosers[1-index].next_slab,
+                    position, ground_dir.normalized(), self.loosers[0].normal
+                )]
+            else:
+                ground_dir = dirA.cross(self.loosers[0].normal)
+                index = 1 if self.loosers[0].prev_slab.isOuter(dirA, ground_dir, polygon_normal) else 0
+                self.children = [Lightcycle(
+                    lightcycles, collision_candidates, polygon_vertices, polygon_normal, False,
+                    self.looser_time, self.loosers[index].prev_slab, self.loosers[1-index].next_slab,
+                    position, ground_dir, self.loosers[0].normal
+                ), Lightcycle(
+                    lightcycles, collision_candidates, polygon_vertices, polygon_normal, True,
+                    self.looser_time, self.loosers[1-index].prev_slab, self.loosers[index].next_slab,
+                    position, -ground_dir, self.loosers[0].normal
+                )]
 
 class Lightcycle:
     __slots__ = ['start_time', 'prev_slab', 'next_slab', 'origin', 'ground_velocity', 'normal', 'collision']
-    def __init__(self, lightcycles, collision_candidates, polygon_vertices, polygon_normal, immunity_index, start_time, prev_slab, next_slab, position, prev_dir, next_dir):
+    def __init__(self, lightcycles, collision_candidates, polygon_vertices, polygon_normal, immunity, start_time, prev_slab, next_slab, position, ground_dir, normal):
         exterior_angle = math.pi-math.acos(prev_slab.edge@-next_slab.edge)
         # pitch_angle = math.atan(math.cos(exterior_angle*0.5))
         ground_speed = 1.0/math.cos(exterior_angle*0.5)
@@ -248,42 +260,43 @@ class Lightcycle:
         self.prev_slab = prev_slab
         self.next_slab = next_slab
         self.origin = position
-        self.ground_velocity = (prev_dir+next_dir).normalized()*ground_speed
-        self.normal = prev_dir.cross(next_dir).normalized()
+        self.ground_velocity = ground_dir*ground_speed
+        self.normal = normal
         self.collision = None
         if self.normal@polygon_normal > 0.0:
             self.prev_slab.next_lightcycles.append(self)
             self.next_slab.prev_lightcycles.append(self)
-        self.collideWithLightcycles(lightcycles, collision_candidates)
-        self.collideWithPolygon(collision_candidates, polygon_vertices, immunity_index)
+        self.collideWithLightcycles(lightcycles, collision_candidates, immunity)
+        self.collideWithPolygon(collision_candidates, polygon_vertices, immunity)
         lightcycles.append(self)
 
-    def collideWithLightcycles(self, lightcycles, collision_candidates, arrival_tollerance=0.001):
-        for i in range(0, len(lightcycles)):
+    def collideWithLightcycles(self, lightcycles, collision_candidates, immunity, arrival_tollerance=0.001):
+        for i in range(0, len(lightcycles)-1 if immunity == True else len(lightcycles)):
             timeA, timeB = rayRayIntersection(self.origin, self.ground_velocity, lightcycles[i].origin, lightcycles[i].ground_velocity)
             if math.isnan(timeA) or math.isnan(timeB):
                 continue
             timeA += self.start_time
             timeB += lightcycles[i].start_time
-            no_winner = abs(timeA-timeB) < arrival_tollerance
+            winner = None if abs(timeA-timeB) < arrival_tollerance else self if timeA < timeB else lightcycles[i]
+            # TODO: Insert in manyfold collision
             insort_right(collision_candidates, lambda collision: collision.looser_time, Collision(
                 winner_time=min(timeA, timeB),
                 looser_time=max(timeA, timeB),
-                winner=(None if no_winner else self if timeA < timeB else lightcycles[i]),
-                loosers=([self, lightcycles[i]] if no_winner else [self if timeA > timeB else lightcycles[i]])
+                winner=winner,
+                loosers=([self, lightcycles[i]] if winner == None else [self if timeA > timeB else lightcycles[i]])
             ))
 
-    def collideWithPolygon(self, collision_candidates, polygon_vertices, immunity_index):
+    def collideWithPolygon(self, collision_candidates, polygon_vertices, immunity):
         min_time = float('inf')
         for index in range(0, len(polygon_vertices)):
-            if immunity_index != None and (index == immunity_index or index == (immunity_index+1)%len(polygon_vertices)):
+            if type(immunity) is int and (index == immunity or index == (immunity+1)%len(polygon_vertices)):
                 continue
             time = rayLineSegmentIntersection(self.origin, self.ground_velocity, polygon_vertices[index-1], polygon_vertices[index])
             if not math.isnan(time):
                 min_time = min(time+self.start_time, min_time)
         if min_time < float('inf'):
             insort_right(collision_candidates, lambda collision: collision.looser_time, Collision(
-                winner_time=None,
+                winner_time=0.0,
                 looser_time=min_time,
                 winner=None,
                 loosers=[self]
@@ -302,15 +315,19 @@ def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5):
 
     for index, prev_slab in enumerate(slabs):
         next_slab = slabs[(index+1)%len(polygon_vertices)]
-        Lightcycle(lightcycles, collision_candidates, polygon_vertices, polygon_normal, index, 0.0, prev_slab, next_slab, polygon_vertices[index], prev_slab.edge, -next_slab.edge)
+        Lightcycle(
+            lightcycles, collision_candidates, polygon_vertices, polygon_normal, index,
+            0.0, prev_slab, next_slab, polygon_vertices[index],
+            (prev_slab.edge-next_slab.edge).normalized(), prev_slab.edge.cross(-next_slab.edge).normalized()
+        )
 
     i = 0
     while i < len(collision_candidates):
         collision = collision_candidates[i]
         if collision.checkCandidate():
-            result = collision.collide(lightcycles, collision_candidates, polygon_vertices, polygon_normal)
-            if result != True:
-                return result
+            collision.collide(lightcycles, collision_candidates, polygon_vertices, polygon_normal)
+            if len(collision.loosers) > 2:
+                return 'Manyfold collision' # TODO
         i += 1
 
     verts = []
