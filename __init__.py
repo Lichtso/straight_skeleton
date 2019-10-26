@@ -31,39 +31,45 @@ bl_info = {
     'tracker_url': 'https://github.com/lichtso/straight_skeleton/issues'
 }
 
-class StraightSkeletonOperator(bpy.types.Operator):
+class StraightSkeleton(bpy.types.Operator):
     bl_idname = 'mesh.straight_skeleton'
     bl_description = bl_label = 'Straight Skeleton'
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        return bpy.context.object != None and bpy.context.object.type == 'CURVE'
+        return bpy.context.object != None and (bpy.context.object.type == 'MESH' or bpy.context.object.type == 'CURVE')
 
     def execute(self, context):
-        # TODO: Allow edge loops in meshes to be used as source polygons too
+        polygons = []
         # TODO: Allow selecting multiple polygons for holes
-
-        if bpy.context.object.mode == 'EDIT':
-            splines = internal.selectedSplines(False, True)
+        if bpy.context.object.type == 'CURVE':
+            if bpy.context.object.mode == 'EDIT':
+                splines = internal.selectedSplines(False, True)
+            else:
+                splines = bpy.context.object.data.splines
+            for spline in splines:
+                polygons.append(list(point.co.xyz for point in spline.points))
         else:
-            splines = bpy.context.object.data.splines
-
-        if len(splines) == 0:
-            self.report({'WARNING'}, 'Nothing selected')
+            loops = []
+            for face in bpy.context.object.data.polygons:
+                if bpy.context.object.mode == 'EDIT' and not face.select:
+                    continue
+                polygon = []
+                for vertex_index in face.vertices:
+                    polygon.append(bpy.context.object.data.vertices[vertex_index].co)
+                polygons.append(polygon)
+        if len(polygons) != 1:
+            self.report({'WARNING'}, 'Invalid selection')
             return {'CANCELLED'}
-
-        for spline in splines:
-            roofModelObj = internal.addObject('MESH', 'Straight Skeleton')
-            polygon_vertices = list(point.co.xyz for point in spline.points)
-            result = internal.straightSkeletonOfPolygon(polygon_vertices, roofModelObj.data)
-            if result != True:
-                self.report({'WARNING'}, result)
+        roof_model_obj = internal.addObject('MESH', 'Straight Skeleton')
+        result = internal.straightSkeletonOfPolygon(polygons[0], roof_model_obj.data)
+        if result != True:
+            self.report({'WARNING'}, result)
             return {'CANCELLED'}
-
         return {'FINISHED'}
 
-classes = [StraightSkeletonOperator]
+classes = [StraightSkeleton]
 
 def menu_mesh_add(self, context):
     self.layout.separator()

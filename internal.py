@@ -44,8 +44,8 @@ def planePlaneIntersection(planeA, planeB, tollerance=0.0001):
     dir = planeA.normal.cross(planeB.normal).normalized()
     ray_origin = planeA.normal*planeA.distance
     ray_dir = planeA.normal.cross(dir)
-    point = ray_origin+ray_dir*linePlaneIntersection(ray_origin, ray_dir, plane)
-    return (point, dir)
+    origin = ray_origin+ray_dir*linePlaneIntersection(ray_origin, ray_dir, planeB)
+    return (origin, dir)
 
 def linePointDistance(begin, dir, point):
     return (point-begin).cross(dir.normalized()).length
@@ -163,7 +163,6 @@ def selectedSplines(include_bezier, include_polygon, allow_partial_selection=Fal
     return result
 
 def addObject(type, name):
-    bpy.ops.object.select_all(action='DESELECT')
     if type == 'CURVE':
         data = bpy.data.curves.new(name=name, type='CURVE')
         data.dimensions = '3D'
@@ -179,7 +178,7 @@ def addObject(type, name):
 
 
 class Slab:
-    __slots__ = ['edge', 'slope', 'plane', 'prev_lightcycles', 'next_lightcycles', 'prev_vertices', 'next_vertices']
+    __slots__ = ['edge', 'slope', 'plane', 'prev_lightcycles', 'next_lightcycles', 'vertices', 'line_segments']
     def __init__(self, polygon_normal, prev_polygon_vertex, next_polygon_vertex):
         self.edge = (next_polygon_vertex-prev_polygon_vertex).normalized()
         edge_orthogonal = self.edge.cross(polygon_normal).normalized()
@@ -188,19 +187,65 @@ class Slab:
         self.plane = Plane(normal=normal, distance=next_polygon_vertex@normal)
         self.prev_lightcycles = []
         self.next_lightcycles = []
-        self.prev_vertices = [prev_polygon_vertex]
-        self.next_vertices = [next_polygon_vertex]
+        self.vertices = [prev_polygon_vertex, next_polygon_vertex]
+        self.line_segments = []
 
-    def isOuter(self, in_dir, out_dir, polygon_normal):
+    def isOuterOfCollision(self, in_dir, out_dir, polygon_normal):
         normal = in_dir.cross(polygon_normal)
         return (normal@self.plane.normal > 0.0) == (normal@out_dir > 0.0)
 
     def calculateVerticesFromLightcycles(self):
-        def handleSide(vertices, lightcycles):
+        def handleSide(lightcycles, prepend):
             for lightcycle in lightcycles:
-                vertices.append(lightcycle.origin+lightcycle.ground_velocity*(lightcycle.collision.looser_time-lightcycle.start_time)+lightcycle.normal*lightcycle.collision.looser_time)
-        handleSide(self.prev_vertices, self.prev_lightcycles)
-        handleSide(self.next_vertices, self.next_lightcycles)
+                vertex = lightcycle.origin+lightcycle.ground_velocity*(lightcycle.collision.looser_time-lightcycle.start_time)+lightcycle.normal*lightcycle.collision.looser_time
+                if prepend:
+                    self.vertices.insert(0, vertex)
+                else:
+                    self.vertices.append(vertex)
+        handleSide(self.prev_lightcycles, True)
+        handleSide(self.next_lightcycles, False)
+
+    def lineIntersection(self, origin, dir, tollerance=0.0001):
+        intersections = []
+        for i in range(0, len(self.vertices)+1):
+            is_last = (i == 0 or i == len(self.vertices))
+            type, paramA, paramB = nearestPointOfLines(origin, dir, self.vertices[0 if i == 0 else i-1], self.slope if is_last else self.vertices[i]-self.vertices[i-1])
+            if type == 'Crossing':
+                if paramB > -tollerance and (is_last or paramB < 1.0+tollerance):
+                    intersections.append((i, paramA))
+            elif type == 'Coaxial':
+                assert(not is_last)
+                intersections.append((i-1, paramA))
+                intersections.append((i, (self.vertices[i]-origin)@dir/(dir@dir)))
+        intersections.sort(key=lambda entry: entry[1])
+        i = 1
+        while i < len(intersections):
+            if intersections[i][1]-intersections[i-1][1] < tollerance:
+                del intersections[i]
+            else:
+                i += 1
+        return intersections
+
+    def intersect(self, other_slab):
+        origin, dir = planePlaneIntersection(self.plane, other_slab.plane)
+        if origin == None:
+            return None
+        intersectionsA = self.lineIntersection(origin, dir)
+        intersectionsB = other_slab.lineIntersection(origin, dir)
+        if len(intersectionsA)%2 == 0 and len(intersectionsB)%2 == 0:
+            for i in range(0, len(intersectionsA), 2):
+                for j in range(0, len(intersectionsB), 2):
+                    max_begin = max(intersectionsA[i][1], intersectionsB[j][1])
+                    min_end = min(intersectionsA[i+1][1], intersectionsB[j+1][1])
+                    if max_begin < min_end:
+                        line_segment = (origin+dir*max_begin, origin+dir*min_end)
+                        self.line_segments.append(line_segment)
+                        other_slab.line_segments.append(line_segment)
+                        # intersections.append(intersectionsA[i] if intersectionsA[i][1] == max_begin else intersectionsB[j])
+                        # intersections.append(intersectionsA[i+1] if intersectionsA[i+1][1] == min_end else intersectionsB[j+1])
+        # print(len(self.vertices), self.vertices, intersectionsA)
+        # print(len(other_slab.vertices), other_slab.vertices, intersectionsB)
+        print(intersectionsA, intersectionsB)
 
 class Collision:
     __slots__ = ['winner_time', 'looser_time', 'winner', 'loosers', 'children']
@@ -229,7 +274,7 @@ class Collision:
             dirB = self.loosers[1].ground_velocity.normalized()
             ground_dir = dirA+dirB
             if ground_dir.length > tollerance:
-                index = 1 if self.loosers[0].prev_slab.isOuter(dirA, ground_dir, polygon_normal) else 0
+                index = 1 if self.loosers[0].prev_slab.isOuterOfCollision(dirA, ground_dir, polygon_normal) else 0
                 if dirA.cross(dirB)@polygon_normal > 0.0:
                     index = 1-index
                 self.children = [Lightcycle(
@@ -239,7 +284,7 @@ class Collision:
                 )]
             else:
                 ground_dir = dirA.cross(self.loosers[0].normal)
-                index = 1 if self.loosers[0].prev_slab.isOuter(dirA, ground_dir, polygon_normal) else 0
+                index = 1 if self.loosers[0].prev_slab.isOuterOfCollision(dirA, ground_dir, polygon_normal) else 0
                 self.children = [Lightcycle(
                     lightcycles, collision_candidates, polygon_vertices, polygon_normal, False,
                     self.looser_time, self.loosers[index].prev_slab, self.loosers[1-index].next_slab,
@@ -302,9 +347,13 @@ class Lightcycle:
                 loosers=[self]
             ))
 
-def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5):
+def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5, tollerance=0.0001):
     polygon_normal = normalOfPolygon(polygon_vertices).normalized()
-    # polygon_plane = Plane(normal=polygon_normal, distance=polygon_vertices[0]@polygon_normal)
+    polygon_plane = Plane(normal=polygon_normal, distance=polygon_vertices[0]@polygon_normal)
+    for polygon_vertex in polygon_vertices:
+        if abs(polygon_vertex@polygon_plane.normal-polygon_plane.distance) > tollerance:
+            return 'Polygon is not planar / level'
+
     slabs = []
     lightcycles = []
     collision_candidates = []
@@ -334,22 +383,30 @@ def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5):
     edges = []
     faces = []
 
-    for index, lightcycle in enumerate(lightcycles):
-        duration = height-lightcycle.start_time if lightcycle.collision == None else lightcycle.collision.looser_time-lightcycle.start_time
-        verts.append(lightcycle.origin+lightcycle.normal*lightcycle.start_time)
-        verts.append(lightcycle.origin+lightcycle.normal*(lightcycle.start_time+duration)+lightcycle.ground_velocity*duration)
-        edges.append((len(verts)-2, len(verts)-1))
+    for j, slabA in enumerate(slabs):
+        slabA.calculateVerticesFromLightcycles()
+        for i, slabB in enumerate(slabs):
+            if i >= j:
+                continue
+            slabA.intersect(slabB)
+        for line_segment in slabA.line_segments:
+            edges.append((len(verts), len(verts)+1))
+            verts += line_segment
+
+    # for index, lightcycle in enumerate(lightcycles):
+    #     duration = height-lightcycle.start_time if lightcycle.collision == None else lightcycle.collision.looser_time-lightcycle.start_time
+    #     verts.append(lightcycle.origin+lightcycle.normal*lightcycle.start_time)
+    #     verts.append(lightcycle.origin+lightcycle.normal*(lightcycle.start_time+duration)+lightcycle.ground_velocity*duration)
+    #     edges.append((len(verts)-2, len(verts)-1))
 
     for index, slab in enumerate(slabs):
         vert_index = len(verts)
-        slab.calculateVerticesFromLightcycles()
         slope_vec = slab.slope*height/(slab.slope@polygon_normal)
         def fillSlopeToHeight(position):
             verts.append(position+slope_vec*(1.0-(position@polygon_normal)/(slope_vec@polygon_normal)))
-        fillSlopeToHeight(slab.prev_vertices[-1])
-        verts += reversed(slab.prev_vertices)
-        verts += slab.next_vertices
-        fillSlopeToHeight(slab.next_vertices[-1])
+        fillSlopeToHeight(slab.vertices[0])
+        verts += slab.vertices
+        fillSlopeToHeight(slab.vertices[-1])
         face = []
         for i in range(vert_index, len(verts)):
             # edges.append((i-1 if i > vert_index else len(verts)-1, i))
@@ -357,5 +414,5 @@ def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5):
         faces.append(face)
 
     mesh_data.from_pydata(verts, edges, faces)
-    mesh_data.update(calc_edges=True)
+    # mesh_data.update(calc_edges=True)
     return True
