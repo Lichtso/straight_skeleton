@@ -42,38 +42,41 @@ class StraightSkeleton(bpy.types.Operator):
 
     def execute(self, context):
         polygons = []
+        src_obj = bpy.context.object
         # TODO: Allow selecting multiple polygons for holes
-        if bpy.context.object.type == 'CURVE':
-            if bpy.context.object.mode == 'EDIT':
+        if src_obj.type == 'CURVE':
+            if src_obj.mode == 'EDIT':
                 splines = internal.selectedSplines(False, True)
             else:
-                splines = bpy.context.object.data.splines
+                splines = src_obj.data.splines
             for spline in splines:
                 polygons.append(list(point.co.xyz for point in spline.points))
         else:
             loops = []
-            for face in bpy.context.object.data.polygons:
-                if bpy.context.object.mode == 'EDIT' and not face.select:
+            for face in src_obj.data.polygons:
+                if src_obj.mode == 'EDIT' and not face.select:
                     continue
                 polygon = []
                 for vertex_index in face.vertices:
-                    polygon.append(bpy.context.object.data.vertices[vertex_index].co)
+                    polygon.append(src_obj.data.vertices[vertex_index].co)
                 polygons.append(polygon)
         if len(polygons) != 1:
             self.report({'WARNING'}, 'Invalid selection')
             return {'CANCELLED'}
-        roof_model_obj = internal.addObject('MESH', 'Straight Skeleton')
-        result = internal.straightSkeletonOfPolygon(polygons[0], roof_model_obj.data)
+        dst_obj = internal.addObject('MESH', 'Straight Skeleton')
+        result = internal.straightSkeletonOfPolygon(polygons[0], dst_obj.data)
         if result != True:
             self.report({'WARNING'}, result)
             return {'CANCELLED'}
+        src_obj.select_set(False)
+        dst_obj.matrix_basis = src_obj.matrix_basis
         return {'FINISHED'}
 
 classes = [StraightSkeleton]
 
 def menu_mesh_add(self, context):
     self.layout.separator()
-    self.layout.operator(StraightSkeletonOperator.bl_idname)
+    self.layout.operator(StraightSkeleton.bl_idname)
 
 def register():
     for cls in classes:

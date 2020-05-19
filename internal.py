@@ -177,8 +177,25 @@ def addObject(type, name):
 
 
 
+class SlabIntersection:
+    __slots__ = ['prev_slab', 'next_slab', 'origin', 'dir', 'begin_param', 'end_param']
+    def __init__(self, prev_slab, next_slab, origin, dir, begin_param, end_param):
+        self.prev_slab = prev_slab
+        self.next_slab = next_slab
+        self.origin = origin
+        self.dir = dir
+        self.begin_param = begin_param
+        self.end_param = end_param
+
+    def reverse(self):
+        self.dir *= -1.0
+        [self.begin_param, self.end_param] = [-self.end_param, -self.begin_param]
+
+    def otherSlab(self, slab):
+        return self.prev_slab if slab == self.next_slab else self.next_slab
+
 class Slab:
-    __slots__ = ['edge', 'slope', 'plane', 'prev_lightcycles', 'next_lightcycles', 'vertices', 'line_segments']
+    __slots__ = ['edge', 'slope', 'plane', 'prev_slab', 'next_slab', 'prev_polygon_vertex', 'next_polygon_vertex', 'prev_lightcycles', 'next_lightcycles', 'vertices', 'slab_intersections']
     def __init__(self, polygon_normal, prev_polygon_vertex, next_polygon_vertex):
         self.edge = (next_polygon_vertex-prev_polygon_vertex).normalized()
         edge_orthogonal = self.edge.cross(polygon_normal).normalized()
@@ -187,8 +204,10 @@ class Slab:
         self.plane = Plane(normal=normal, distance=next_polygon_vertex@normal)
         self.prev_lightcycles = []
         self.next_lightcycles = []
-        self.vertices = [prev_polygon_vertex, next_polygon_vertex]
-        self.line_segments = []
+        self.prev_polygon_vertex = prev_polygon_vertex
+        self.next_polygon_vertex = next_polygon_vertex
+        self.vertices = [self.prev_polygon_vertex, self.next_polygon_vertex]
+        self.slab_intersections = []
 
     def isOuterOfCollision(self, in_dir, out_dir, polygon_normal):
         normal = in_dir.cross(polygon_normal)
@@ -197,7 +216,7 @@ class Slab:
     def calculateVerticesFromLightcycles(self):
         def handleSide(lightcycles, prepend):
             for lightcycle in lightcycles:
-                vertex = lightcycle.origin+lightcycle.ground_velocity*(lightcycle.collision.looser_time-lightcycle.start_time)+lightcycle.normal*lightcycle.collision.looser_time
+                vertex = lightcycle.slab_intersection.origin+lightcycle.slab_intersection.dir*lightcycle.slab_intersection.end_param
                 if prepend:
                     self.vertices.insert(0, vertex)
                 else:
@@ -232,20 +251,87 @@ class Slab:
             return None
         intersectionsA = self.lineIntersection(origin, dir)
         intersectionsB = other_slab.lineIntersection(origin, dir)
-        if len(intersectionsA)%2 == 0 and len(intersectionsB)%2 == 0:
-            for i in range(0, len(intersectionsA), 2):
-                for j in range(0, len(intersectionsB), 2):
-                    max_begin = max(intersectionsA[i][1], intersectionsB[j][1])
-                    min_end = min(intersectionsA[i+1][1], intersectionsB[j+1][1])
-                    if max_begin < min_end:
-                        line_segment = (origin+dir*max_begin, origin+dir*min_end)
-                        self.line_segments.append(line_segment)
-                        other_slab.line_segments.append(line_segment)
-                        # intersections.append(intersectionsA[i] if intersectionsA[i][1] == max_begin else intersectionsB[j])
-                        # intersections.append(intersectionsA[i+1] if intersectionsA[i+1][1] == min_end else intersectionsB[j+1])
-        # print(len(self.vertices), self.vertices, intersectionsA)
-        # print(len(other_slab.vertices), other_slab.vertices, intersectionsB)
-        print(intersectionsA, intersectionsB)
+        if len(intersectionsA) == 2 and len(intersectionsB) == 2:
+            begin_param = max(intersectionsA[0][1], intersectionsB[0][1])
+            end_param = min(intersectionsA[1][1], intersectionsB[1][1])
+            if begin_param < end_param:
+                slab_intersection = SlabIntersection(self, other_slab, origin+begin_param*dir, dir, 0.0, end_param-begin_param)
+                self.slab_intersections.append(slab_intersection)
+                other_slab.slab_intersections.append(slab_intersection)
+
+    def calculateVerticesFromIntersections(self, tollerance=0.001):
+        # def findLineOfOtherSlab(slab):
+        #     for candidate in self.slab_intersections:
+        #         if candidate.otherSlab(self) == slab:
+        #             return candidate
+        #     return None
+        pivot = self.prev_polygon_vertex
+        current_line = None
+        for candidate in self.slab_intersections:
+            if candidate.prev_slab == self.prev_slab or candidate.next_slab == self.prev_slab:
+                current_line = candidate
+                break
+        if abs((current_line.origin+current_line.dir*current_line.begin_param-pivot)@current_line.dir) > abs((current_line.origin+current_line.dir*current_line.end_param-pivot)@current_line.dir):
+            current_line.reverse()
+        self.vertices = [self.prev_polygon_vertex, self.next_polygon_vertex]
+        print('start', pivot)
+        while current_line.prev_slab != self.next_slab and current_line.next_slab != self.next_slab:
+            self.slab_intersections.remove(current_line)
+            pivot_param = (pivot-current_line.origin)@current_line.dir
+            print('current_line', len(self.slab_intersections), pivot, pivot_param, current_line.origin+current_line.dir*current_line.begin_param, current_line.origin+current_line.dir*current_line.end_param)
+            best_candidate = None
+            # other_slab = getOtherSlab(current_line)
+            # lightcycles = []
+            # if len(other_slab.prev_lightcycles) > 0:
+            #     lightcycles.append(other_slab.prev_lightcycles[-1])
+            # if len(other_slab.next_lightcycles) > 0:
+            #     lightcycles.append(other_slab.next_lightcycles[-1])
+            # for lightcycle in lightcycles:
+            #     third_slab = lightcycle.next_slab if lightcycle.prev_slab == other_slab else lightcycle.prev_slab
+            #     if third_slab != self:
+            #         for candidate in self.slab_intersections:
+            #             if getOtherSlab(candidate) == third_slab:
+            #                 best_candidate = candidate
+            # print('best_candidate', best_candidate)
+            # if best_candidate != None:
+            #     pivot = current_line[2]+current_line[3]*current_line[5]
+            #     if abs((best_candidate[2]+best_candidate[3]*best_candidate[4]-pivot)@best_candidate[3]) > abs((best_candidate[2]+best_candidate[3]*best_candidate[5]-pivot)@best_candidate[3]):
+            #         flipLine(best_candidate)
+            # else:
+            best_param = float('nan')
+            for candidate in self.slab_intersections:
+                type, paramA, paramB = nearestPointOfLines(current_line.origin, current_line.dir, candidate.origin, candidate.dir)
+                print(type, paramA, paramB, pivot_param <= paramA and current_line.begin_param-tollerance <= paramA, paramA <= current_line.end_param+tollerance, candidate.begin_param-tollerance <= paramB, paramB <= candidate.end_param+tollerance)
+                print(pivot_param, paramA)
+                print(current_line.begin_param-tollerance, paramA, current_line.end_param+tollerance)
+                print(candidate.begin_param-tollerance, paramB, candidate.end_param+tollerance)
+                if type == 'Crossing':
+                    if pivot_param <= paramA and current_line.begin_param-tollerance <= paramA and paramA <= current_line.end_param+tollerance and candidate.begin_param-tollerance <= paramB and paramB <= candidate.end_param+tollerance:
+                        # print('vertex', paramA, candidate, current_line.origin+current_line.dir*current_line.begin_param)
+                        if best_candidate == None or best_param > paramA:
+                            best_candidate = candidate
+                            best_param = paramA
+                elif type == 'Coaxial':
+                    pivot = current_line.origin+current_line.dir*current_line.end_param
+                    if abs((candidate.origin+candidate.dir*candidate.begin_param-pivot)@current_line.dir) <= tollerance or abs((candidate.origin+candidate.dir*candidate.end_param-pivot)@current_line.dir) <= tollerance:
+                        best_candidate = candidate
+                        best_param = paramA
+            if best_candidate == None:
+                print('error')
+                break
+            pivot = current_line.origin+current_line.dir*best_param
+            begin_param = abs((best_candidate.origin+best_candidate.dir*best_candidate.begin_param-pivot)@best_candidate.dir)
+            end_param = abs((best_candidate.origin+best_candidate.dir*best_candidate.end_param-pivot)@best_candidate.dir)
+            if begin_param <= tollerance or end_param <= tollerance:
+                if begin_param > end_param:
+                    best_candidate.reverse()
+            else:
+                normal = self.plane.normal.cross(current_line.dir)
+                if (best_candidate.origin+best_candidate.dir*best_candidate.begin_param-pivot)@normal < (best_candidate.origin+best_candidate.dir*best_candidate.end_param-pivot)@normal:
+                    best_candidate.reverse()
+            current_line = best_candidate
+            self.vertices.insert(0, pivot)
+        self.slab_intersections = None
 
 class Collision:
     __slots__ = ['winner_time', 'looser_time', 'winner', 'loosers', 'children']
@@ -269,55 +355,54 @@ class Collision:
             looser.collision = self
         if len(self.loosers) == 2:
             assert(self.loosers[0].normal@self.loosers[1].normal > 0.0)
-            position = self.loosers[0].origin+self.loosers[0].ground_velocity*self.looser_time
+            position = self.loosers[0].ground_origin+self.loosers[0].ground_velocity*self.looser_time
             dirA = self.loosers[0].ground_velocity.normalized()
             dirB = self.loosers[1].ground_velocity.normalized()
             ground_dir = dirA+dirB
             if ground_dir.length > tollerance:
-                index = 1 if self.loosers[0].prev_slab.isOuterOfCollision(dirA, ground_dir, polygon_normal) else 0
+                index = 1 if self.loosers[0].slab_intersection.prev_slab.isOuterOfCollision(dirA, ground_dir, polygon_normal) else 0
                 if dirA.cross(dirB)@polygon_normal > 0.0:
                     index = 1-index
                 self.children = [Lightcycle(
                     lightcycles, collision_candidates, polygon_vertices, polygon_normal, False,
-                    self.looser_time, self.loosers[index].prev_slab, self.loosers[1-index].next_slab,
+                    self.looser_time, self.loosers[index].slab_intersection.prev_slab, self.loosers[1-index].slab_intersection.next_slab,
                     position, ground_dir.normalized(), self.loosers[0].normal
                 )]
             else:
                 ground_dir = dirA.cross(self.loosers[0].normal)
-                index = 1 if self.loosers[0].prev_slab.isOuterOfCollision(dirA, ground_dir, polygon_normal) else 0
+                index = 1 if self.loosers[0].slab_intersection.prev_slab.isOuterOfCollision(dirA, ground_dir, polygon_normal) else 0
                 self.children = [Lightcycle(
                     lightcycles, collision_candidates, polygon_vertices, polygon_normal, False,
-                    self.looser_time, self.loosers[index].prev_slab, self.loosers[1-index].next_slab,
+                    self.looser_time, self.loosers[index].slab_intersection.prev_slab, self.loosers[1-index].slab_intersection.next_slab,
                     position, ground_dir, self.loosers[0].normal
                 ), Lightcycle(
                     lightcycles, collision_candidates, polygon_vertices, polygon_normal, True,
-                    self.looser_time, self.loosers[1-index].prev_slab, self.loosers[index].next_slab,
+                    self.looser_time, self.loosers[1-index].slab_intersection.prev_slab, self.loosers[index].slab_intersection.next_slab,
                     position, -ground_dir, self.loosers[0].normal
                 )]
 
 class Lightcycle:
-    __slots__ = ['start_time', 'prev_slab', 'next_slab', 'origin', 'ground_velocity', 'normal', 'collision']
+    __slots__ = ['start_time', 'ground_origin', 'ground_velocity', 'normal', 'collision', 'slab_intersection']
     def __init__(self, lightcycles, collision_candidates, polygon_vertices, polygon_normal, immunity, start_time, prev_slab, next_slab, position, ground_dir, normal):
         exterior_angle = math.pi-math.acos(prev_slab.edge@-next_slab.edge)
         # pitch_angle = math.atan(math.cos(exterior_angle*0.5))
         ground_speed = 1.0/math.cos(exterior_angle*0.5)
         self.start_time = start_time
-        self.prev_slab = prev_slab
-        self.next_slab = next_slab
-        self.origin = position
+        self.ground_origin = position
         self.ground_velocity = ground_dir*ground_speed
         self.normal = normal
         self.collision = None
+        self.slab_intersection = SlabIntersection(prev_slab, next_slab, None, None, 0.0, 0.0)
         if self.normal@polygon_normal > 0.0:
-            self.prev_slab.next_lightcycles.append(self)
-            self.next_slab.prev_lightcycles.append(self)
+            prev_slab.next_lightcycles.append(self)
+            next_slab.prev_lightcycles.append(self)
         self.collideWithLightcycles(lightcycles, collision_candidates, immunity)
         self.collideWithPolygon(collision_candidates, polygon_vertices, immunity)
         lightcycles.append(self)
 
     def collideWithLightcycles(self, lightcycles, collision_candidates, immunity, arrival_tollerance=0.001):
         for i in range(0, len(lightcycles)-1 if immunity == True else len(lightcycles)):
-            timeA, timeB = rayRayIntersection(self.origin, self.ground_velocity, lightcycles[i].origin, lightcycles[i].ground_velocity)
+            timeA, timeB = rayRayIntersection(self.ground_origin, self.ground_velocity, lightcycles[i].ground_origin, lightcycles[i].ground_velocity)
             if math.isnan(timeA) or math.isnan(timeB):
                 continue
             timeA += self.start_time
@@ -336,7 +421,7 @@ class Lightcycle:
         for index in range(0, len(polygon_vertices)):
             if type(immunity) is int and (index == immunity or index == (immunity+1)%len(polygon_vertices)):
                 continue
-            time = rayLineSegmentIntersection(self.origin, self.ground_velocity, polygon_vertices[index-1], polygon_vertices[index])
+            time = rayLineSegmentIntersection(self.ground_origin, self.ground_velocity, polygon_vertices[index-1], polygon_vertices[index])
             if not math.isnan(time):
                 min_time = min(time+self.start_time, min_time)
         if min_time < float('inf'):
@@ -346,6 +431,17 @@ class Lightcycle:
                 winner=None,
                 loosers=[self]
             ))
+
+    def calculateLineSegement(self, tollerance=0.0001):
+        if self.collision == None:
+            return
+        self.slab_intersection.origin = self.ground_origin+self.normal*self.start_time
+        dir = self.ground_origin+self.ground_velocity*(self.collision.looser_time-self.start_time)+self.normal*self.collision.looser_time-self.slab_intersection.origin
+        self.slab_intersection.dir = dir.normalized()
+        self.slab_intersection.end_param = dir@self.slab_intersection.dir
+        if self.slab_intersection.prev_slab.plane.normal@self.slab_intersection.next_slab.plane.normal >= 1.0-tollerance:
+            self.slab_intersection.prev_slab.slab_intersections.append(self.slab_intersection)
+            self.slab_intersection.next_slab.slab_intersections.append(self.slab_intersection)
 
 def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5, tollerance=0.0001):
     polygon_normal = normalOfPolygon(polygon_vertices).normalized()
@@ -364,6 +460,8 @@ def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5, tolleranc
 
     for index, prev_slab in enumerate(slabs):
         next_slab = slabs[(index+1)%len(polygon_vertices)]
+        next_slab.prev_slab = prev_slab
+        prev_slab.next_slab = next_slab
         Lightcycle(
             lightcycles, collision_candidates, polygon_vertices, polygon_normal, index,
             0.0, prev_slab, next_slab, polygon_vertices[index],
@@ -379,9 +477,8 @@ def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5, tolleranc
                 return 'Manyfold collision' # TODO
         i += 1
 
-    verts = []
-    edges = []
-    faces = []
+    for lightcycle in lightcycles:
+        lightcycle.calculateLineSegement()
 
     for j, slabA in enumerate(slabs):
         slabA.calculateVerticesFromLightcycles()
@@ -389,24 +486,35 @@ def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5, tolleranc
             if i >= j:
                 continue
             slabA.intersect(slabB)
-        for line_segment in slabA.line_segments:
-            edges.append((len(verts), len(verts)+1))
-            verts += line_segment
+
+    for slab in slabs:
+        slab.calculateVerticesFromIntersections()
+
+    verts = []
+    edges = []
+    faces = []
+
+    # slab = slabs[9]
+    # for slab_intersection in slab.slab_intersections:
+    #     edges.append((len(verts), len(verts)+1))
+    #     verts.append(slab_intersection[2]+slab_intersection[3]*slab_intersection[4])
+    #     verts.append(slab_intersection[2]+slab_intersection[3]*slab_intersection[5])
+    # slab.calculateVerticesFromLineSegments()
 
     # for index, lightcycle in enumerate(lightcycles):
     #     duration = height-lightcycle.start_time if lightcycle.collision == None else lightcycle.collision.looser_time-lightcycle.start_time
-    #     verts.append(lightcycle.origin+lightcycle.normal*lightcycle.start_time)
-    #     verts.append(lightcycle.origin+lightcycle.normal*(lightcycle.start_time+duration)+lightcycle.ground_velocity*duration)
+    #     verts.append(lightcycle.ground_origin+lightcycle.normal*lightcycle.start_time)
+    #     verts.append(lightcycle.ground_origin+lightcycle.normal*(lightcycle.start_time+duration)+lightcycle.ground_velocity*duration)
     #     edges.append((len(verts)-2, len(verts)-1))
 
     for index, slab in enumerate(slabs):
         vert_index = len(verts)
-        slope_vec = slab.slope*height/(slab.slope@polygon_normal)
-        def fillSlopeToHeight(position):
-            verts.append(position+slope_vec*(1.0-(position@polygon_normal)/(slope_vec@polygon_normal)))
-        fillSlopeToHeight(slab.vertices[0])
+        # slope_vec = slab.slope*height/(slab.slope@polygon_normal)
+        # def fillSlopeToHeight(position):
+        #     verts.append(position+slope_vec*(1.0-(position@polygon_normal)/(slope_vec@polygon_normal)))
+        # fillSlopeToHeight(slab.vertices[0])
         verts += slab.vertices
-        fillSlopeToHeight(slab.vertices[-1])
+        # fillSlopeToHeight(slab.vertices[-1])
         face = []
         for i in range(vert_index, len(verts)):
             # edges.append((i-1 if i > vert_index else len(verts)-1, i))
