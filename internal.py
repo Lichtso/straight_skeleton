@@ -224,7 +224,7 @@ class Slab:
         handleSide(self.prev_lightcycles, True)
         handleSide(self.next_lightcycles, False)
 
-    def lineIntersection(self, origin, dir, tollerance=0.0001):
+    def rayBoundaryIntersection(self, origin, dir, tollerance=0.0001):
         intersections = []
         for i in range(0, len(self.vertices)+1):
             is_last = (i == 0 or i == len(self.vertices))
@@ -245,12 +245,12 @@ class Slab:
                 i += 1
         return intersections
 
-    def intersect(self, other_slab):
+    def calculateSlabIntersection(self, other_slab):
         origin, dir = planePlaneIntersection(self.plane, other_slab.plane)
         if origin == None:
             return None
-        intersectionsA = self.lineIntersection(origin, dir)
-        intersectionsB = other_slab.lineIntersection(origin, dir)
+        intersectionsA = self.rayBoundaryIntersection(origin, dir)
+        intersectionsB = other_slab.rayBoundaryIntersection(origin, dir)
         if len(intersectionsA) == 2 and len(intersectionsB) == 2:
             begin_param = max(intersectionsA[0][1], intersectionsB[0][1])
             end_param = min(intersectionsA[1][1], intersectionsB[1][1])
@@ -260,11 +260,6 @@ class Slab:
                 other_slab.slab_intersections.append(slab_intersection)
 
     def calculateVerticesFromIntersections(self, tollerance=0.001):
-        # def findLineOfOtherSlab(slab):
-        #     for candidate in self.slab_intersections:
-        #         if candidate.otherSlab(self) == slab:
-        #             return candidate
-        #     return None
         pivot = self.prev_polygon_vertex
         current_line = None
         for candidate in self.slab_intersections:
@@ -274,61 +269,45 @@ class Slab:
         if abs((current_line.origin+current_line.dir*current_line.begin_param-pivot)@current_line.dir) > abs((current_line.origin+current_line.dir*current_line.end_param-pivot)@current_line.dir):
             current_line.reverse()
         self.vertices = [self.prev_polygon_vertex, self.next_polygon_vertex]
-        print('start', pivot)
-        while current_line.prev_slab != self.next_slab and current_line.next_slab != self.next_slab:
+        while current_line != None and current_line.prev_slab != self.next_slab and current_line.next_slab != self.next_slab:
             self.slab_intersections.remove(current_line)
             pivot_param = (pivot-current_line.origin)@current_line.dir
-            print('current_line', len(self.slab_intersections), pivot, pivot_param, current_line.origin+current_line.dir*current_line.begin_param, current_line.origin+current_line.dir*current_line.end_param)
             best_candidate = None
-            # other_slab = getOtherSlab(current_line)
-            # lightcycles = []
-            # if len(other_slab.prev_lightcycles) > 0:
-            #     lightcycles.append(other_slab.prev_lightcycles[-1])
-            # if len(other_slab.next_lightcycles) > 0:
-            #     lightcycles.append(other_slab.next_lightcycles[-1])
-            # for lightcycle in lightcycles:
-            #     third_slab = lightcycle.next_slab if lightcycle.prev_slab == other_slab else lightcycle.prev_slab
-            #     if third_slab != self:
-            #         for candidate in self.slab_intersections:
-            #             if getOtherSlab(candidate) == third_slab:
-            #                 best_candidate = candidate
-            # print('best_candidate', best_candidate)
-            # if best_candidate != None:
-            #     pivot = current_line[2]+current_line[3]*current_line[5]
-            #     if abs((best_candidate[2]+best_candidate[3]*best_candidate[4]-pivot)@best_candidate[3]) > abs((best_candidate[2]+best_candidate[3]*best_candidate[5]-pivot)@best_candidate[3]):
-            #         flipLine(best_candidate)
-            # else:
             best_param = float('nan')
+            current_other_slab = current_line.otherSlab(self)
+            lightcycles = []
+            if len(current_other_slab.prev_lightcycles) > 0:
+                lightcycles.append(current_other_slab.prev_lightcycles[-1])
+            if len(current_other_slab.next_lightcycles) > 0:
+                lightcycles.append(current_other_slab.next_lightcycles[-1])
+            for lightcycle in lightcycles:
+                param = linePlaneIntersection(lightcycle.slab_intersection.origin, lightcycle.slab_intersection.dir, self.plane)
+                if lightcycle.slab_intersection.begin_param-tollerance <= param and param <= lightcycle.slab_intersection.end_param+tollerance:
+                    candidate_other_slab = lightcycle.slab_intersection.otherSlab(current_other_slab)
+                    position = lightcycle.slab_intersection.origin+lightcycle.slab_intersection.dir*param
+                    param = (position-pivot)@current_line.dir
+                    if candidate_other_slab != self and param > 0.0:
+                        for candidate in self.slab_intersections:
+                            if candidate.otherSlab(self) == candidate_other_slab:
+                                best_candidate = candidate
+                                best_param = current_line.end_param
+                                if abs((best_candidate.origin+best_candidate.dir*best_candidate.begin_param-pivot)@best_candidate.dir) > abs((best_candidate.origin+best_candidate.dir*best_candidate.end_param-pivot)@best_candidate.dir):
+                                    best_candidate.reverse()
+                                break
             for candidate in self.slab_intersections:
+                if candidate == best_candidate:
+                    continue
                 type, paramA, paramB = nearestPointOfLines(current_line.origin, current_line.dir, candidate.origin, candidate.dir)
-                print(type, paramA, paramB, pivot_param <= paramA and current_line.begin_param-tollerance <= paramA, paramA <= current_line.end_param+tollerance, candidate.begin_param-tollerance <= paramB, paramB <= candidate.end_param+tollerance)
-                print(pivot_param, paramA)
-                print(current_line.begin_param-tollerance, paramA, current_line.end_param+tollerance)
-                print(candidate.begin_param-tollerance, paramB, candidate.end_param+tollerance)
-                if type == 'Crossing':
-                    if pivot_param <= paramA and current_line.begin_param-tollerance <= paramA and paramA <= current_line.end_param+tollerance and candidate.begin_param-tollerance <= paramB and paramB <= candidate.end_param+tollerance:
-                        # print('vertex', paramA, candidate, current_line.origin+current_line.dir*current_line.begin_param)
-                        if best_candidate == None or best_param > paramA:
-                            best_candidate = candidate
-                            best_param = paramA
-                elif type == 'Coaxial':
-                    pivot = current_line.origin+current_line.dir*current_line.end_param
-                    if abs((candidate.origin+candidate.dir*candidate.begin_param-pivot)@current_line.dir) <= tollerance or abs((candidate.origin+candidate.dir*candidate.end_param-pivot)@current_line.dir) <= tollerance:
-                        best_candidate = candidate
-                        best_param = paramA
-            if best_candidate == None:
-                print('error')
-                break
+                if type == 'Crossing' and pivot_param <= paramA and \
+                   current_line.begin_param-tollerance <= paramA and paramA <= current_line.end_param+tollerance and \
+                   candidate.begin_param-tollerance <= paramB and paramB <= candidate.end_param+tollerance and \
+                   (best_candidate == None or best_param > paramA):
+                    best_candidate = candidate
+                    best_param = paramA
+                    normal = self.plane.normal.cross(current_line.dir)
+                    if (best_candidate.origin+best_candidate.dir*best_candidate.begin_param-pivot)@normal < (best_candidate.origin+best_candidate.dir*best_candidate.end_param-pivot)@normal:
+                        best_candidate.reverse()
             pivot = current_line.origin+current_line.dir*best_param
-            begin_param = abs((best_candidate.origin+best_candidate.dir*best_candidate.begin_param-pivot)@best_candidate.dir)
-            end_param = abs((best_candidate.origin+best_candidate.dir*best_candidate.end_param-pivot)@best_candidate.dir)
-            if begin_param <= tollerance or end_param <= tollerance:
-                if begin_param > end_param:
-                    best_candidate.reverse()
-            else:
-                normal = self.plane.normal.cross(current_line.dir)
-                if (best_candidate.origin+best_candidate.dir*best_candidate.begin_param-pivot)@normal < (best_candidate.origin+best_candidate.dir*best_candidate.end_param-pivot)@normal:
-                    best_candidate.reverse()
             current_line = best_candidate
             self.vertices.insert(0, pivot)
         self.slab_intersections = None
@@ -432,14 +411,14 @@ class Lightcycle:
                 loosers=[self]
             ))
 
-    def calculateLineSegement(self, tollerance=0.0001):
+    def calculateSlabIntersection(self, tollerance=0.0001):
         if self.collision == None:
             return
         self.slab_intersection.origin = self.ground_origin+self.normal*self.start_time
         dir = self.ground_origin+self.ground_velocity*(self.collision.looser_time-self.start_time)+self.normal*self.collision.looser_time-self.slab_intersection.origin
         self.slab_intersection.dir = dir.normalized()
         self.slab_intersection.end_param = dir@self.slab_intersection.dir
-        if self.slab_intersection.prev_slab.plane.normal@self.slab_intersection.next_slab.plane.normal >= 1.0-tollerance:
+        if self.start_time > 0.0:
             self.slab_intersection.prev_slab.slab_intersections.append(self.slab_intersection)
             self.slab_intersection.next_slab.slab_intersections.append(self.slab_intersection)
 
@@ -477,50 +456,31 @@ def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5, tolleranc
                 return 'Manyfold collision' # TODO
         i += 1
 
+    verts = []
+    edges = []
+    faces = []
+
     for lightcycle in lightcycles:
-        lightcycle.calculateLineSegement()
+        lightcycle.calculateSlabIntersection()
+        # if lightcycle.collision != None:
+        #     verts += [lightcycle.slab_intersection.origin, lightcycle.slab_intersection.origin+lightcycle.slab_intersection.dir*lightcycle.slab_intersection.end_param]
+        #     edges.append((len(verts)-2, len(verts)-1))
 
     for j, slabA in enumerate(slabs):
         slabA.calculateVerticesFromLightcycles()
         for i, slabB in enumerate(slabs):
             if i >= j:
                 continue
-            slabA.intersect(slabB)
-
-    for slab in slabs:
-        slab.calculateVerticesFromIntersections()
-
-    verts = []
-    edges = []
-    faces = []
-
-    # slab = slabs[9]
-    # for slab_intersection in slab.slab_intersections:
-    #     edges.append((len(verts), len(verts)+1))
-    #     verts.append(slab_intersection[2]+slab_intersection[3]*slab_intersection[4])
-    #     verts.append(slab_intersection[2]+slab_intersection[3]*slab_intersection[5])
-    # slab.calculateVerticesFromLineSegments()
-
-    # for index, lightcycle in enumerate(lightcycles):
-    #     duration = height-lightcycle.start_time if lightcycle.collision == None else lightcycle.collision.looser_time-lightcycle.start_time
-    #     verts.append(lightcycle.ground_origin+lightcycle.normal*lightcycle.start_time)
-    #     verts.append(lightcycle.ground_origin+lightcycle.normal*(lightcycle.start_time+duration)+lightcycle.ground_velocity*duration)
-    #     edges.append((len(verts)-2, len(verts)-1))
+            slabA.calculateSlabIntersection(slabB)
+        # for slab_intersection in slabA.slab_intersections:
+        #     verts += [slab_intersection.origin+slab_intersection.dir*slab_intersection.begin_param, slab_intersection.origin+slab_intersection.dir*slab_intersection.end_param]
+        #     edges.append((len(verts)-2, len(verts)-1))
 
     for index, slab in enumerate(slabs):
+        slab.calculateVerticesFromIntersections()
         vert_index = len(verts)
-        # slope_vec = slab.slope*height/(slab.slope@polygon_normal)
-        # def fillSlopeToHeight(position):
-        #     verts.append(position+slope_vec*(1.0-(position@polygon_normal)/(slope_vec@polygon_normal)))
-        # fillSlopeToHeight(slab.vertices[0])
         verts += slab.vertices
-        # fillSlopeToHeight(slab.vertices[-1])
-        face = []
-        for i in range(vert_index, len(verts)):
-            # edges.append((i-1 if i > vert_index else len(verts)-1, i))
-            face.append(i)
-        faces.append(face)
+        faces.append(range(vert_index, len(verts)))
 
     mesh_data.from_pydata(verts, edges, faces)
-    # mesh_data.update(calc_edges=True)
     return True
