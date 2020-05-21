@@ -16,7 +16,9 @@
 #
 #  ***** GPL LICENSE BLOCK *****
 
-import os, bpy, importlib
+import os, bpy, importlib, bmesh
+from bpy_extras import view3d_utils
+from mathutils import Vector
 if 'internal' in locals():
     importlib.reload(internal)
 from . import internal
@@ -41,38 +43,109 @@ class StraightSkeleton(bpy.types.Operator):
         return bpy.context.object != None and (bpy.context.object.type == 'MESH' or bpy.context.object.type == 'CURVE')
 
     def execute(self, context):
-        polygons = []
         src_obj = bpy.context.object
-        # TODO: Allow selecting multiple polygons for holes
-        if src_obj.type == 'CURVE':
-            if src_obj.mode == 'EDIT':
-                splines = internal.selectedSplines(False, True)
-            else:
-                splines = src_obj.data.splines
-            for spline in splines:
-                polygons.append(list(point.co.xyz for point in spline.points))
-        else:
-            loops = []
-            for face in src_obj.data.polygons:
-                if src_obj.mode == 'EDIT' and not face.select:
-                    continue
-                polygon = []
-                for vertex_index in face.vertices:
-                    polygon.append(src_obj.data.vertices[vertex_index].co)
-                polygons.append(polygon)
+        polygons = internal.selectedPolygons(src_obj)
         if len(polygons) != 1:
             self.report({'WARNING'}, 'Invalid selection')
             return {'CANCELLED'}
         dst_obj = internal.addObject('MESH', 'Straight Skeleton')
-        result = internal.straightSkeletonOfPolygon(polygons[0], dst_obj.data)
-        if result != True:
+        plane_matrix = internal.straightSkeletonOfPolygon(polygons[0], dst_obj.data)
+        if isinstance(plane_matrix, str):
             self.report({'WARNING'}, result)
             return {'CANCELLED'}
-        src_obj.select_set(False)
-        dst_obj.matrix_basis = src_obj.matrix_basis
+        dst_obj.matrix_world = src_obj.matrix_world@plane_matrix
         return {'FINISHED'}
 
-classes = [StraightSkeleton]
+class SliceMesh(bpy.types.Operator):
+    bl_idname = 'mesh.slice'
+    bl_description = bl_label = 'Slice Mesh'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    pitch: bpy.props.FloatProperty(name='Pitch', unit='LENGTH', description='Distance between two slices', default=0.1)
+    offset: bpy.props.FloatProperty(name='Offset', unit='LENGTH', description='Position of first slice along the axis', default=0.0)
+    slice_count: bpy.props.IntProperty(name='Count', description='Number of slices', min=1, default=3)
+    output_type: bpy.props.EnumProperty(name='Output', items=[
+        ('MESH', 'Mesh', 'Outputs a mesh object with edge loops'),
+        ('CURVE', 'Curve', 'Outputs a curve object with poly splines')
+    ], default='MESH')
+
+    @classmethod
+    def poll(cls, context):
+        return bpy.context.object != None and bpy.context.object.mode == 'OBJECT'
+
+    def perform(self):
+        internal.sliceMesh(self.mesh, self.dst_obj, [(i*self.pitch+self.offset) for i in range(0, self.slice_count)], Vector((0.0, 0.0, 1.0)))
+
+    def execute(self, context):
+        depsgraph = context.evaluated_depsgraph_get()
+        self.src_obj = bpy.context.object
+        self.dst_obj = internal.addObject(self.output_type, 'Slices')
+        self.dst_obj.matrix_world = bpy.context.scene.cursor.matrix
+        self.mesh = bmesh.new()
+        self.mesh.from_object(self.src_obj, depsgraph, deform=True, cage=False, face_normals=True)
+        self.mesh.transform(self.dst_obj.matrix_world.inverted()@self.src_obj.matrix_world)
+        self.perform()
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        if bpy.context.object.type != 'MESH':
+            self.report({'WARNING'}, 'Active object must be a mesh')
+            return {'CANCELLED'}
+        self.pitch = 0.1
+        self.offset = 0.0
+        self.slice_count = 3
+        self.mode = 'PITCH'
+        self.execute(context)
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type == 'MOUSEMOVE':
+            mouse = (event.mouse_region_x, event.mouse_region_y)
+            input_value = internal.nearestPointOfLines(
+                bpy.context.scene.cursor.location,
+                bpy.context.scene.cursor.matrix.col[2].xyz,
+                view3d_utils.region_2d_to_origin_3d(context.region, context.region_data, mouse),
+                view3d_utils.region_2d_to_vector_3d(context.region, context.region_data, mouse)
+            )[1]
+            if self.mode == 'PITCH':
+                self.pitch = input_value/(self.slice_count-1) if self.slice_count > 2 else input_value
+            elif self.mode == 'OFFSET':
+                self.offset = input_value-self.pitch*0.5*((self.slice_count-1) if self.slice_count > 2 else 1.0)
+        elif event.type == 'WHEELUPMOUSE':
+            if self.slice_count > 2:
+                self.pitch *= (self.slice_count-1)
+            self.slice_count += 1
+            if self.slice_count > 2:
+                self.pitch /= (self.slice_count-1)
+        elif event.type == 'WHEELDOWNMOUSE':
+            if self.slice_count > 2:
+                self.pitch *= (self.slice_count-1)
+            if self.slice_count > 1:
+                self.slice_count -= 1
+            if self.slice_count > 2:
+                self.pitch /= (self.slice_count-1)
+        elif event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+            if self.mode == 'PITCH':
+                self.mode = 'OFFSET'
+                return {'RUNNING_MODAL'}
+            elif self.mode == 'OFFSET':
+                self.mesh.free()
+                return {'FINISHED'}
+        elif event.type in {'RIGHTMOUSE', 'ESC'}:
+            self.mesh.free()
+            if self.dst_obj.type == 'MESH':
+                bpy.data.meshes.remove(self.dst_obj.data)
+            else:
+                bpy.data.curves.remove(self.dst_obj.data)
+            bpy.context.view_layer.objects.active = self.src_obj
+            return {'CANCELLED'}
+        else:
+            return {'PASS_THROUGH'}
+        self.perform()
+        return {'RUNNING_MODAL'}
+
+classes = [StraightSkeleton, SliceMesh]
 
 def menu_mesh_add(self, context):
     self.layout.separator()

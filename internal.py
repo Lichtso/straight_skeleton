@@ -16,8 +16,8 @@
 #
 #  ***** GPL LICENSE BLOCK *****
 
-import bpy, math
-from mathutils import Vector
+import bpy, math, bmesh
+from mathutils import Vector, Matrix
 from collections import namedtuple
 
 Plane = namedtuple('Plane', 'normal distance')
@@ -50,7 +50,7 @@ def planePlaneIntersection(planeA, planeB, tollerance=0.0001):
 def linePointDistance(begin, dir, point):
     return (point-begin).cross(dir.normalized()).length
 
-def nearestPointOfLines(originA, dirA, originB, dirB, param_tollerance=0.0, dist_tollerance=0.0001):
+def nearestPointOfLines(originA, dirA, originB, dirB, param_tollerance=0.0, dist_tollerance=0.001):
     # https://en.wikipedia.org/wiki/Skew_lines#Nearest_Points
     normal = dirA.cross(dirB)
     normalA = dirA.cross(normal)
@@ -59,7 +59,7 @@ def nearestPointOfLines(originA, dirA, originB, dirB, param_tollerance=0.0, dist
     divisorB = dirB@normalA
     originAB = originB-originA
     if abs(divisorA) <= param_tollerance or abs(divisorB) <= param_tollerance:
-        if dirA@dirA == 0.0 or dirB@dirB == 0.0 or linePointDistance(originA, dirA, originB) > dist_tollerance:
+        if dirA@dirA == 0.0 or dirB@dirB == 0.0 or linePointDistance(originA, dirA, originB) >= dist_tollerance:
             return ('Parallel', float('nan'), float('nan'))
         paramA =  originAB@dirA/(dirA@dirA)
         paramB = -originAB@dirB/(dirB@dirB)
@@ -69,7 +69,7 @@ def nearestPointOfLines(originA, dirA, originB, dirB, param_tollerance=0.0, dist
         paramB = -originAB@normalA/divisorB
         nearestPointA = originA+dirA*paramA
         nearestPointB = originB+dirB*paramB
-        return ('Crossing' if (nearestPointA-nearestPointB).length < dist_tollerance else 'Skew', paramA, paramB)
+        return ('Crossing' if (nearestPointA-nearestPointB).length <= dist_tollerance else 'Skew', paramA, paramB)
 
 def lineSegmentLineSegmentIntersection(lineAVertexA, lineAVertexB, lineBVertexA, lineBVertexB):
     dirA = lineAVertexB-lineAVertexA
@@ -136,31 +136,33 @@ def insort_right(sorted_list, keyfunc, entry, lo=0, hi=None):
 
 
 
-def selectedSplines(include_bezier, include_polygon, allow_partial_selection=False):
-    result = []
-    for spline in bpy.context.object.data.splines:
-        selected = not allow_partial_selection
-        if spline.type == 'BEZIER':
-            if not include_bezier:
-                continue
-            for index, point in enumerate(spline.bezier_points):
-                if point.select_left_handle == allow_partial_selection or \
-                   point.select_control_point == allow_partial_selection or \
-                   point.select_right_handle == allow_partial_selection:
-                    selected = allow_partial_selection
-                    break
-        elif spline.type == 'POLY':
-            if not include_polygon:
-                continue
-            for index, point in enumerate(spline.points):
-                if point.select == allow_partial_selection:
-                    selected = allow_partial_selection
-                    break
+def selectedPolygons(src_obj):
+    polygons = []
+    in_edit_mode = (src_obj.mode == 'EDIT')
+    bpy.ops.object.mode_set(mode='OBJECT')
+    if src_obj.type == 'CURVE':
+        if in_edit_mode:
+            splines = []
+            for spline in bpy.context.object.data.splines:
+                selected = True
+                if spline.type == 'POLY':
+                    for index, point in enumerate(spline.points):
+                        if point.select == False:
+                            selected = False
+                            break
+                    if selected:
+                        splines.append(spline)
         else:
-            continue
-        if selected:
-            result.append(spline)
-    return result
+            splines = src_obj.data.splines
+        for spline in splines:
+            polygons.append(list(point.co.xyz for point in spline.points))
+    else:
+        loops = []
+        for face in src_obj.data.polygons:
+            if in_edit_mode and not face.select:
+                continue
+            polygons.append(list(src_obj.data.vertices[vertex_index].co for vertex_index in face.vertices))
+    return polygons
 
 def addObject(type, name):
     if type == 'CURVE':
@@ -174,6 +176,17 @@ def addObject(type, name):
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
     return obj
+
+def addPolygonSpline(obj, cyclic, vertices, weights=None, select=False):
+    spline = obj.data.splines.new(type='POLY')
+    spline.use_cyclic_u = cyclic
+    spline.points.add(len(vertices)-1)
+    for index, point in enumerate(spline.points):
+        point.co.xyz = vertices[index]
+        point.select = select
+        if weights:
+            point.weight_softbody = weights[index]
+    return spline
 
 
 
@@ -245,7 +258,10 @@ class Slab:
                 i += 1
         return intersections
 
-    def calculateSlabIntersection(self, other_slab):
+    def calculateSlabIntersection(self, other_slab, is_first, tollerance=0.0001):
+        for lightcycles in (self.next_lightcycles if is_first else self.prev_lightcycles):
+            if lightcycles.slab_intersection.prev_slab == other_slab or lightcycles.slab_intersection.next_slab == other_slab:
+                return
         origin, dir = planePlaneIntersection(self.plane, other_slab.plane)
         if origin == None:
             return None
@@ -254,7 +270,7 @@ class Slab:
         if len(intersectionsA) == 2 and len(intersectionsB) == 2:
             begin_param = max(intersectionsA[0][1], intersectionsB[0][1])
             end_param = min(intersectionsA[1][1], intersectionsB[1][1])
-            if begin_param < end_param:
+            if begin_param < end_param and end_param-begin_param >= tollerance:
                 slab_intersection = SlabIntersection(self, other_slab, origin+begin_param*dir, dir, 0.0, end_param-begin_param)
                 self.slab_intersections.append(slab_intersection)
                 other_slab.slab_intersections.append(slab_intersection)
@@ -266,10 +282,13 @@ class Slab:
             if candidate.prev_slab == self.prev_slab or candidate.next_slab == self.prev_slab:
                 current_line = candidate
                 break
+        if current_line == None:
+            print('ERROR: calculateVerticesFromIntersections() could not find the first current_line')
+            return
         if abs((current_line.origin+current_line.dir*current_line.begin_param-pivot)@current_line.dir) > abs((current_line.origin+current_line.dir*current_line.end_param-pivot)@current_line.dir):
             current_line.reverse()
         self.vertices = [self.prev_polygon_vertex, self.next_polygon_vertex]
-        while current_line != None and current_line.prev_slab != self.next_slab and current_line.next_slab != self.next_slab:
+        while current_line.prev_slab != self.next_slab and current_line.next_slab != self.next_slab:
             self.slab_intersections.remove(current_line)
             pivot_param = (pivot-current_line.origin)@current_line.dir
             best_candidate = None
@@ -307,6 +326,9 @@ class Slab:
                     normal = self.plane.normal.cross(current_line.dir)
                     if (best_candidate.origin+best_candidate.dir*best_candidate.begin_param-pivot)@normal < (best_candidate.origin+best_candidate.dir*best_candidate.end_param-pivot)@normal:
                         best_candidate.reverse()
+            if best_candidate == None:
+                print('ERROR: calculateVerticesFromIntersections() could not find the next current_line')
+                return
             pivot = current_line.origin+current_line.dir*best_param
             current_line = best_candidate
             self.vertices.insert(0, pivot)
@@ -333,7 +355,7 @@ class Collision:
         for looser in self.loosers:
             looser.collision = self
         if len(self.loosers) == 2:
-            assert(self.loosers[0].normal@self.loosers[1].normal > 0.0)
+            assert(self.loosers[0].ground_normal@self.loosers[1].ground_normal > 0.0)
             position = self.loosers[0].ground_origin+self.loosers[0].ground_velocity*self.looser_time
             dirA = self.loosers[0].ground_velocity.normalized()
             dirB = self.loosers[1].ground_velocity.normalized()
@@ -345,34 +367,35 @@ class Collision:
                 self.children = [Lightcycle(
                     lightcycles, collision_candidates, polygon_vertices, polygon_normal, False,
                     self.looser_time, self.loosers[index].slab_intersection.prev_slab, self.loosers[1-index].slab_intersection.next_slab,
-                    position, ground_dir.normalized(), self.loosers[0].normal
+                    position, ground_dir.normalized(), self.loosers[0].ground_normal
                 )]
             else:
-                ground_dir = dirA.cross(self.loosers[0].normal)
+                ground_dir = dirA.cross(self.loosers[0].ground_normal)
                 index = 1 if self.loosers[0].slab_intersection.prev_slab.isOuterOfCollision(dirA, ground_dir, polygon_normal) else 0
                 self.children = [Lightcycle(
                     lightcycles, collision_candidates, polygon_vertices, polygon_normal, False,
                     self.looser_time, self.loosers[index].slab_intersection.prev_slab, self.loosers[1-index].slab_intersection.next_slab,
-                    position, ground_dir, self.loosers[0].normal
+                    position, ground_dir, self.loosers[0].ground_normal
                 ), Lightcycle(
                     lightcycles, collision_candidates, polygon_vertices, polygon_normal, True,
                     self.looser_time, self.loosers[1-index].slab_intersection.prev_slab, self.loosers[index].slab_intersection.next_slab,
-                    position, -ground_dir, self.loosers[0].normal
+                    position, -ground_dir, self.loosers[0].ground_normal
                 )]
 
 class Lightcycle:
-    __slots__ = ['start_time', 'ground_origin', 'ground_velocity', 'normal', 'collision', 'slab_intersection']
-    def __init__(self, lightcycles, collision_candidates, polygon_vertices, polygon_normal, immunity, start_time, prev_slab, next_slab, position, ground_dir, normal):
-        exterior_angle = math.pi-math.acos(prev_slab.edge@-next_slab.edge)
+    __slots__ = ['start_time', 'ground_origin', 'ground_velocity', 'ground_normal', 'inwards', 'collision', 'slab_intersection']
+    def __init__(self, lightcycles, collision_candidates, polygon_vertices, polygon_normal, immunity, start_time, prev_slab, next_slab, position, ground_dir, ground_normal):
+        exterior_angle = math.pi-math.acos(max(-1.0, min(prev_slab.edge@-next_slab.edge, 1.0)))
         # pitch_angle = math.atan(math.cos(exterior_angle*0.5))
         ground_speed = 1.0/math.cos(exterior_angle*0.5)
         self.start_time = start_time
         self.ground_origin = position
         self.ground_velocity = ground_dir*ground_speed
-        self.normal = normal
+        self.ground_normal = ground_normal
+        self.inwards = (self.ground_normal@polygon_normal > 0.0)
         self.collision = None
         self.slab_intersection = SlabIntersection(prev_slab, next_slab, None, None, 0.0, 0.0)
-        if self.normal@polygon_normal > 0.0:
+        if self.inwards:
             prev_slab.next_lightcycles.append(self)
             next_slab.prev_lightcycles.append(self)
         self.collideWithLightcycles(lightcycles, collision_candidates, immunity)
@@ -414,11 +437,11 @@ class Lightcycle:
     def calculateSlabIntersection(self, tollerance=0.0001):
         if self.collision == None:
             return
-        self.slab_intersection.origin = self.ground_origin+self.normal*self.start_time
-        dir = self.ground_origin+self.ground_velocity*(self.collision.looser_time-self.start_time)+self.normal*self.collision.looser_time-self.slab_intersection.origin
+        self.slab_intersection.origin = self.ground_origin+self.ground_normal*self.start_time
+        dir = self.ground_origin+self.ground_velocity*(self.collision.looser_time-self.start_time)+self.ground_normal*self.collision.looser_time-self.slab_intersection.origin
         self.slab_intersection.dir = dir.normalized()
         self.slab_intersection.end_param = dir@self.slab_intersection.dir
-        if self.start_time > 0.0:
+        if self.inwards:
             self.slab_intersection.prev_slab.slab_intersections.append(self.slab_intersection)
             self.slab_intersection.next_slab.slab_intersections.append(self.slab_intersection)
 
@@ -428,6 +451,18 @@ def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5, tolleranc
     for polygon_vertex in polygon_vertices:
         if abs(polygon_vertex@polygon_plane.normal-polygon_plane.distance) > tollerance:
             return 'Polygon is not planar / level'
+
+    polygon_tangent = (polygon_vertices[1]-polygon_vertices[0]).normalized()
+    plane_matrix = Matrix.Identity(4)
+    plane_matrix.col[0] = polygon_tangent.to_4d()
+    plane_matrix.col[1] = polygon_normal.cross(polygon_tangent).normalized().to_4d()
+    plane_matrix.col[2] = polygon_normal.to_4d()
+    plane_matrix.col[3] = (polygon_plane.normal*polygon_plane.distance).to_4d()
+    plane_matrix.col[0].w = plane_matrix.col[1].w = plane_matrix.col[2].w = 0.0
+    plane_matrix_inverse = plane_matrix.inverted()
+    plane_matrix_inverse.row[2].zero()
+    polygon_vertices = [plane_matrix_inverse@vertex for vertex in polygon_vertices]
+    polygon_normal = Vector((0.0, 0.0, 1.0))
 
     slabs = []
     lightcycles = []
@@ -471,7 +506,7 @@ def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5, tolleranc
         for i, slabB in enumerate(slabs):
             if i >= j:
                 continue
-            slabA.calculateSlabIntersection(slabB)
+            slabA.calculateSlabIntersection(slabB, i == 0)
         # for slab_intersection in slabA.slab_intersections:
         #     verts += [slab_intersection.origin+slab_intersection.dir*slab_intersection.begin_param, slab_intersection.origin+slab_intersection.dir*slab_intersection.end_param]
         #     edges.append((len(verts)-2, len(verts)-1))
@@ -483,4 +518,47 @@ def straightSkeletonOfPolygon(polygon_vertices, mesh_data, height=1.5, tolleranc
         faces.append(range(vert_index, len(verts)))
 
     mesh_data.from_pydata(verts, edges, faces)
-    return True
+    return plane_matrix
+
+
+
+def sliceMesh(src_mesh, dst_obj, distances, axis):
+    if dst_obj.type == 'MESH':
+        dst_obj.data.clear_geometry()
+    else:
+        dst_obj.data.splines.clear()
+    out_vertices = []
+    out_edges = []
+    for distance in distances:
+        aux_mesh = src_mesh.copy()
+        cut_geometry = bmesh.ops.bisect_plane(aux_mesh, geom=aux_mesh.edges[:]+aux_mesh.faces[:], dist=0, plane_co=axis*distance, plane_no=axis, clear_outer=False, clear_inner=False)['geom_cut']
+        edge_pool = set((e for e in cut_geometry if isinstance(e, bmesh.types.BMEdge)))
+        while len(edge_pool) > 0:
+            current_edge = edge_pool.pop()
+            first_vertex = current_vertex = current_edge.verts[0]
+            vertices = [current_vertex.co]
+            while True:
+                current_vertex = current_edge.other_vert(current_vertex)
+                if current_vertex == first_vertex:
+                    break
+                vertices.append(current_vertex.co)
+                follow_edge_loop = False
+                for edge in current_vertex.link_edges:
+                    if edge in edge_pool:
+                        current_edge = edge
+                        edge_pool.remove(current_edge)
+                        follow_edge_loop = True
+                        break
+                if not follow_edge_loop:
+                    break
+            if dst_obj.type == 'MESH':
+                for i in range(len(out_vertices), len(out_vertices)+len(vertices)-1):
+                    out_edges.append((i, i+1))
+                if current_vertex == first_vertex:
+                    out_edges.append((len(out_vertices), len(out_vertices)+len(vertices)-1))
+                out_vertices += [Vector(vertex) for vertex in vertices]
+            else:
+                addPolygonSpline(dst_obj, current_vertex == first_vertex, vertices)
+        aux_mesh.free()
+    if dst_obj.type == 'MESH':
+        dst_obj.data.from_pydata(out_vertices, out_edges, [])
