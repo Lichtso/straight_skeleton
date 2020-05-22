@@ -145,7 +145,88 @@ class SliceMesh(bpy.types.Operator):
         self.perform()
         return {'RUNNING_MODAL'}
 
-classes = [StraightSkeleton, SliceMesh]
+class InsetPolygon(bpy.types.Operator):
+    bl_idname = 'mesh.inset_polygon'
+    bl_description = bl_label = 'Inset Polygon'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    offset: bpy.props.FloatProperty(name='Offset', unit='LENGTH', description='Offset which is then divided by increasing Count', default=0.25)
+    slice_count: bpy.props.IntProperty(name='Count', description='Number of traces', min=1, default=1)
+
+    @classmethod
+    def poll(cls, context):
+        return bpy.context.object != None and bpy.context.object.mode == 'EDIT'
+
+    def perform(self):
+        internal.sliceMesh(self.mesh, self.dst_obj, [self.offset*i/self.slice_count for i in range(1, self.slice_count+1)], Vector((0.0, 0.0, 1.0)))
+
+    def done(self):
+        self.src_obj.select_set(True)
+        bpy.context.view_layer.objects.active = self.src_obj
+        bpy.ops.object.join()
+        bpy.ops.object.mode_set(mode='EDIT')
+
+    def execute(self, context):
+        self.src_obj = bpy.context.object
+        polygons = internal.selectedPolygons(self.src_obj)
+        if len(polygons) != 1:
+            self.report({'WARNING'}, 'Invalid selection')
+            return {'CANCELLED'}
+        self.roof_model = internal.addObject('MESH', 'Straight Skeleton')
+        plane_matrix = internal.straightSkeletonOfPolygon(polygons[0], self.roof_model.data)
+        if isinstance(plane_matrix, str):
+            self.report({'WARNING'}, result)
+            return {'CANCELLED'}
+        self.max_offset = self.roof_model.dimensions.z
+        self.src_obj.select_set(False)
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.remove_doubles()
+        bpy.ops.mesh.dissolve_limited()
+        bpy.ops.object.mode_set(mode='OBJECT')
+        self.dst_obj = internal.addObject(self.src_obj.type, 'Slices')
+        self.dst_obj.matrix_world = self.src_obj.matrix_world@plane_matrix
+        self.dst_obj.scale.z = 0.0
+        self.mesh = bmesh.new()
+        self.mesh.from_mesh(self.roof_model.data)
+        self.perform()
+        bpy.data.meshes.remove(self.roof_model.data)
+        if context != None:
+            self.done()
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        self.offset = 0.25
+        self.slice_count = 1
+        self.execute(None)
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type == 'MOUSEMOVE':
+            self.offset = self.max_offset*min(1.0, 1.0-2.0*Vector((event.mouse_region_x/context.region.width-0.5, event.mouse_region_y/context.region.height-0.5)).length)
+        elif event.type == 'WHEELUPMOUSE':
+            self.slice_count += 1
+        elif event.type == 'WHEELDOWNMOUSE':
+            if self.slice_count > 1:
+                self.slice_count -= 1
+        elif event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+            self.mesh.free()
+            self.done()
+            return {'FINISHED'}
+        elif event.type in {'RIGHTMOUSE', 'ESC'}:
+            self.mesh.free()
+            if self.dst_obj.type == 'MESH':
+                bpy.data.meshes.remove(self.dst_obj.data)
+            else:
+                bpy.data.curves.remove(self.dst_obj.data)
+            bpy.context.view_layer.objects.active = self.src_obj
+            return {'CANCELLED'}
+        else:
+            return {'PASS_THROUGH'}
+        self.perform()
+        return {'RUNNING_MODAL'}
+
+classes = [StraightSkeleton, SliceMesh, InsetPolygon]
 
 def menu_mesh_add(self, context):
     self.layout.separator()
