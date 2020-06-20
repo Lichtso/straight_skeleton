@@ -40,12 +40,12 @@ def linePlaneIntersection(origin, dir, plane):
 def planePlaneIntersection(planeA, planeB, tollerance=0.0001):
     # return mathutils.geometry.intersect_plane_plane(planeA.normal*planeA.distance, planeA.normal, planeB.normal*planeB.distance, planeB.normal)
     if 1.0-abs(planeA.normal@planeB.normal) < tollerance:
-        return (None, None)
+        return ('Parallel' if abs(planeA.distance-planeB.distance) > tollerance else 'Coplanar', None, None)
     dir = planeA.normal.cross(planeB.normal).normalized()
     ray_origin = planeA.normal*planeA.distance
     ray_dir = planeA.normal.cross(dir)
     origin = ray_origin+ray_dir*linePlaneIntersection(ray_origin, ray_dir, planeB)
-    return (origin, dir)
+    return ('Intersecting', origin, dir)
 
 def linePointDistance(begin, dir, point):
     return (point-begin).cross(dir.normalized()).length
@@ -259,12 +259,16 @@ class Slab:
         return intersections
 
     def calculateSlabIntersection(self, other_slab, is_first, tollerance=0.0001):
-        for lightcycles in (self.next_lightcycles if is_first else self.prev_lightcycles):
-            if lightcycles.slab_intersection.prev_slab == other_slab or lightcycles.slab_intersection.next_slab == other_slab:
-                return
-        origin, dir = planePlaneIntersection(self.plane, other_slab.plane)
-        if origin == None:
-            return None
+        lightcycles = self.next_lightcycles if is_first else self.prev_lightcycles
+        if len(lightcycles) > 0 and (lightcycles[0].slab_intersection.prev_slab == other_slab or lightcycles[0].slab_intersection.next_slab == other_slab):
+            return
+        type, origin, dir = planePlaneIntersection(self.plane, other_slab.plane)
+        if type != 'Intersecting':
+            if self.prev_slab == other_slab or self.next_slab == other_slab:
+                slab_intersection = SlabIntersection(self, other_slab, self.prev_polygon_vertex if self.prev_slab == other_slab else self.next_polygon_vertex, self.slope, 0.0, float('inf'))
+                self.slab_intersections.append(slab_intersection)
+                other_slab.slab_intersections.append(slab_intersection)
+            return
         intersectionsA = self.rayBoundaryIntersection(origin, dir)
         intersectionsB = other_slab.rayBoundaryIntersection(origin, dir)
         if len(intersectionsA) == 2 and len(intersectionsB) == 2:
@@ -317,7 +321,7 @@ class Slab:
                 if candidate == best_candidate:
                     continue
                 type, paramA, paramB = nearestPointOfLines(current_line.origin, current_line.dir, candidate.origin, candidate.dir)
-                if type == 'Crossing' and pivot_param <= paramA and \
+                if (type == 'Crossing' or type == 'Coaxial') and pivot_param-tollerance <= paramA and \
                    current_line.begin_param-tollerance <= paramA and paramA <= current_line.end_param+tollerance and \
                    candidate.begin_param-tollerance <= paramB and paramB <= candidate.end_param+tollerance and \
                    (best_candidate == None or best_param > paramA):
@@ -438,9 +442,9 @@ class Lightcycle:
         if self.collision == None:
             return
         self.slab_intersection.origin = self.ground_origin+self.ground_normal*self.start_time
-        dir = self.ground_origin+self.ground_velocity*(self.collision.looser_time-self.start_time)+self.ground_normal*self.collision.looser_time-self.slab_intersection.origin
+        dir = self.ground_velocity+self.ground_normal
         self.slab_intersection.dir = dir.normalized()
-        self.slab_intersection.end_param = dir@self.slab_intersection.dir
+        self.slab_intersection.end_param = dir@self.slab_intersection.dir*(self.collision.looser_time-self.start_time)
         if self.inwards:
             self.slab_intersection.prev_slab.slab_intersections.append(self.slab_intersection)
             self.slab_intersection.next_slab.slab_intersections.append(self.slab_intersection)
